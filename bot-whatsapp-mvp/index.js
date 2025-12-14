@@ -9,7 +9,10 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const chalk = require('chalk');
 const ora = require('ora');
 
-// --- 🔧 INICIALIZAÇÃO E CHECAGEM DE SEGURANÇA ---
+// --- 🔧 DEFINIÇÕES GERAIS ---
+// Instrução do sistema (Personalidade do Bot)
+const SYSTEM_INSTRUCTION = "Você é a Clara, assistente virtual da clínica OdontoVida. Você deve ser simpática, profissional e objetiva. Responda dúvidas sobre agendamentos e tratamentos básicos. Use emojis moderadamente."; 
+
 console.clear();
 console.log(chalk.bold.cyan('🚀 INICIANDO MVP - PROTOCOLO ODONTOVIDA...'));
 
@@ -40,34 +43,64 @@ spinner.text = 'Firebase Conectado... Conectando IA...';
 
 // 2. Conecta Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-spinner.succeed(chalk.green('Sistemas Conectados! (Firebase + Gemini AI)'));
+// --- CORREÇÃO AQUI: Mudança para o modelo mais atual (Flash) ---
+const model = genAI.getGenerativeModel({ 
+    model: "gemini-2.5-flash", // Modelo mais rápido e atualizado
+    systemInstruction: SYSTEM_INSTRUCTION // Nova forma de passar a instrução
+});
 
-// --- 🧠 CÉREBRO DO BOT (Instruções) ---
-const SYSTEM_INSTRUCTION = `
-Você é a 'Clara', assistente virtual da clínica 'OdontoVida'.
-SUAS REGRAS:
-1. Seja extremamente simpática e use emojis (🦷, ✨, 📅).
-2. Responda de forma curta (máximo 2 frases).
-3. Se perguntarem preços, use esta tabela:
-    - Limpeza: R$ 150,00
-    - Clareamento: R$ 800,00
-    - Implante: A partir de R$ 2.000,00
-4. Se o cliente quiser agendar, pergunte: "Qual o melhor dia para você?"
-5. Se o cliente disser uma data, confirme dizendo: "Perfeito! Deixei pré-agendado com o Dr. Marcos."
-`;
+spinner.succeed(chalk.green('Sistemas Conectados! (Firebase + Gemini 1.5 Flash)'));
 
-// --- 📱 CLIENTE WHATSAPP ---
-const client = new Client({ authStrategy: new LocalAuth() });
+// --- 🤖 INICIALIZAÇÃO DO CLIENTE WHATSAPP ---
+const client = new Client({
+    authStrategy: new LocalAuth()
+});
 
-// Funções de Banco de Dados
-async function salvarLog(userId, texto, autor) {
-    const role = autor === 'bot' ? 'model' : 'user';
-    await db.collection('usuarios').doc(userId).collection('historico').add({
-        mensagem: texto, role: role, data: new Date()
-    });
-}
+// --- EVENTOS DO CLIENTE ---
+
+client.on('qr', (qr) => {
+    console.log(chalk.yellow('\n⚠️  Escaneie o QR Code abaixo para entrar:'));
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('ready', () => {
+    console.log(chalk.bgGreen.black.bold(' ✅ TUDO PRONTO! O BOT ESTÁ ONLINE '));
+    console.log(chalk.gray('Mande uma mensagem para o seu número para testar...'));
+});
+
+// Evento de mensagem
+client.on('message', async (message) => {
+    if (message.from.includes('@g.us') || message.from.includes('status')) return;
+    
+    console.log(chalk.blue(`\n👤 Cliente (${message.from.slice(0,4)}...): ${message.body}`));
+    const think = ora('IA Pensando...').start();
+
+    try {
+        await salvarLog(message.from, message.body, 'user');
+        const historico = await obterContexto(message.from);
+        
+        // Inicia o chat com o histórico
+        const chat = model.startChat({
+            history: historico
+        });
+
+        const result = await chat.sendMessage(message.body);
+        const resposta = result.response.text();
+
+        await client.sendMessage(message.from, resposta);
+        await salvarLog(message.from, resposta, 'bot');
+        
+        think.succeed(chalk.green('Respondido!'));
+        console.log(chalk.magenta(`🤖 Bot Clara: ${resposta}`));
+
+    } catch (error) {
+        think.fail(chalk.red('Erro ao processar'));
+        console.error(chalk.red('Detalhe do erro:'), error.message || error);
+    }
+});
+
+// --- FUNÇÕES AUXILIARES ---
 
 async function obterContexto(userId) {
     const historicoRef = db.collection('usuarios').doc(userId).collection('historico');
@@ -80,44 +113,16 @@ async function obterContexto(userId) {
     return historico.reverse();
 }
 
-// Eventos
-client.on('qr', (qr) => {
-    console.log(chalk.yellow('\n⚠️  Escaneie o QR Code abaixo para entrar:'));
-    qrcode.generate(qr, { small: true });
-});
-
-client.on('ready', () => {
-    console.log(chalk.bgGreen.black.bold(' ✅ TUDO PRONTO! O BOT ESTÁ ONLINE '));
-    console.log(chalk.gray('Mande uma mensagem para o seu número para testar...'));
-});
-
-client.on('message', async (message) => {
-    if (message.from.includes('@g.us') || message.from.includes('status')) return;
+async function salvarLog(userId, mensagem, role) {
+    const historicoRef = db.collection('usuarios').doc(userId).collection('historico');
+    const roleGemini = role === 'bot' ? 'model' : 'user';
     
-    console.log(chalk.blue(`\n👤 Cliente (${message.from.slice(0,4)}...): ${message.body}`));
-    const think = ora('IA Pensando...').start();
+    await historicoRef.add({
+        role: roleGemini,
+        mensagem: mensagem,
+        data: new Date()
+    });
+}
 
-    try {
-        await salvarLog(message.from, message.body, 'user');
-        const historico = await obterContexto(message.from);
-        
-        const chat = model.startChat({
-            history: historico,
-            systemInstruction: SYSTEM_INSTRUCTION
-        });
-
-        const result = await chat.sendMessage(message.body);
-        const resposta = result.response.text();
-
-        await client.sendMessage(message.from, resposta);
-        await salvarLog(message.from, resposta, 'bot');
-        
-        think.succeed(chalk.green('Respondido!'));
-        console.log(chalk.magenta(`🤖 Bot Clara: ${resposta}`));
-    } catch (error) {
-        think.fail(chalk.red('Erro ao processar'));
-        console.error(chalk.red(error));
-    }
-});
-
+// Inicializa o cliente
 client.initialize();
